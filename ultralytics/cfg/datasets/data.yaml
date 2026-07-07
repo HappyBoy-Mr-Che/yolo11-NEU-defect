@@ -1,0 +1,8 @@
+train: F:/SWUST/dataset/severstal-steel-defect-detection/train/images
+val:  F:/SWUST/dataset/severstal-steel-defect-detection/val/images
+test: F:/SWUST/dataset/severstal-steel-defect-detection/test/images
+
+nc: 4
+names: ['pitting', 'Inclusion', 'Scratches', 'Patches']
+
+#severstal_data

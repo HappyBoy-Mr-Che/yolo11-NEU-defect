@@ -1,0 +1,9 @@
+train: E:/Machine_sample/quexian_detect/NEU-DET/train/images
+val:   E:/Machine_sample/quexian_detect/NEU-DET/val/images
+test:  E:/Machine_sample/quexian_detect/NEU-DET/test/images
+
+# number of classes
+nc: 6
+
+# class names (NEU-DET 完整6类)
+names: ['Crazing', 'Inclusion', 'Patches', 'Pitted_surface', 'Rolled-in_scale', 'Scratches']

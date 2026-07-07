@@ -1,0 +1,8 @@
+<RCC>
+  <qresource prefix="img">
+    <file>psd.png</file>
+    <file>user.png</file>
+    <file>用户角色.svg</file>
+    <file>a.jpeg</file>
+  </qresource>
+</RCC>
