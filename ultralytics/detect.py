@@ -11,7 +11,7 @@ if __name__ == '__main__':
 
     # 进行验证，使用真实标签
     results = model.val(
-        data='./ultralytics/cfg/datasets/NUE_DET.yaml',  # 指定数据集配置文件
+        data='./cfg/datasets/NUE_DET.yaml',  # 指定数据集配置文件
         save=True,  # 保存检测结果
         conf=0.25,  # 置信度阈值
         imgsz=640,  # 图像大小

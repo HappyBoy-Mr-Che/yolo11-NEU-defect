@@ -167,6 +167,130 @@
 
 ---
 
+## 🧪 实验报告
+
+本项目提供一键实验脚本,所有实验统一超参(SGD lr0=1e-4,与 `train.py` 一致)、自动生成 markdown 报告到 `docs/`,保证结果可复现、可对比。
+
+### 消融实验 — 逐模块增益验证
+
+```bash
+python tools/ablation.py                # 生成变体 YAML, 逐个训练(已训过自动跳过) + 验证
+python tools/ablation.py --only-val     # 只用已有 best.pt 验证, 不训练
+```
+
+| 变体 | 配置 | 说明 | 参数量 |
+|------|------|------|--------|
+| A baseline | `yolo11.yaml` | 标准 YOLO11 (C3k2, P3-P5) | ≈2.62M |
+| B +C3k2_IDC | 自动生成 | 全部 C3k2 → C3k2_IDC | ≈2.48M |
+| C +SAFMNPP | 自动生成 | P4→P3 上采样替换为 SAFMNPP | ≈5.65M |
+| D +IDC+SAFMNPP | `YOLOV11.yaml` | B+C | ≈5.68M |
+| E 完整版 | `Yolov11_EMA.yaml` | D + P2 检测层 + SCSABlock | ≈3.08M |
+
+输出:`docs/ablation_report.md`(mAP / 参数量 / GFLOPs 对比表)
+
+### 跨模型对比 — 与主流 baseline 公平对比
+
+```bash
+python tools/compare_baselines.py       # yolov8n / yolo11n / 改进版 / RT-DETR-l 统一超参对比
+```
+
+输出:`docs/compare_report.md`(含推理延迟列,RT-DETR-l 显存不足时加 `--batch 4`)
+
+---
+
+## 🚀 部署与轻量化
+
+完整轻量化部署链路,支持从 PyTorch 权重到 ONNX / TensorRT 的导出、剪枝压缩、知识蒸馏与全链路延迟基准。
+
+### 导出 ONNX / TensorRT
+
+```bash
+python tools/export.py --weights models/best.pt --format onnx --imgsz 640 --half
+python tools/export.py --weights models/best.pt --format engine --imgsz 640 --half   # 需 GPU + tensorrt
+```
+
+输出 ONNX/engine 文件 + 体积对比报告(无 CUDA 时 TensorRT 自动跳过)。
+
+### BN-L1 结构化通道剪枝
+
+```bash
+python tools/prune.py --weights models/best.pt --ratio 0.4
+python tools/prune.py --weights models/best.pt --ratio 0.4 --finetune-epochs 30   # 剪枝后微调
+```
+
+自实现无外部依赖:按 BN gamma 全局百分位阈值剪 backbone/neck 独立 Conv 层,通道 mask 沿前向图传播(处理 Concat 多分支),原位保存可加载 `.pt`。不触碰 C3k2_IDC/C2PSA/SPPF/SAFMNPP/SCSABlock 内部结构,避免残差通道对齐问题。
+
+### 特征级知识蒸馏
+
+```bash
+python tools/distill.py --teacher models/yolo11_DSE.pt \
+    --student ultralytics/cfg/models/11/YOLOV11.yaml \
+    --data ultralytics/cfg/datasets/NUE_DET.yaml \
+    --epochs 150 --kd-weight 0.5 --batch 8 --device cpu
+```
+
+teacher 权重存普通 dict 不进 optimizer/EMA;student 检测头输入特征(P3/P4/P5,按 stride 配对)MSE 蒸馏 + 可学习 1×1 adapter 对齐通道;训练结束自动解包纯净 student 权重并验证对比。
+
+### 全链路延迟基准
+
+```bash
+python tools/benchmark.py --weights models/best.pt models/best.onnx --n 50
+```
+
+分阶段计时(预处理 / 推理 / 后处理)+ 参数量 / GFLOPs / 文件体积 / 显存统计,支持 `.pt` / `.onnx` / `.engine`。输出:`docs/benchmark_report.md`。
+
+---
+
+## 🗂️ 数据工具链
+
+覆盖"体检 → 划分 → 增强 → 预标注 → 难例回流"完整数据闭环,详见 [标注规范](docs/ANNOTATION_GUIDE.md)。
+
+### 数据集体检
+
+```bash
+python tools/dataset_check.py                            # 检查 NEU-DET train/val
+python tools/dataset_check.py --data my_data.yaml --splits train val test
+```
+
+自动检查:图片-标签配对 / 格式合法性 / bbox 越界 / 空标签统计 / 坏图(PIL 校验)/ 重复图(MD5)/ 每类直方图 / 框尺寸分布。输出 `docs/dataset_check_report.md`。
+
+### 分层划分
+
+```bash
+python tools/dataset_split.py --src dataset/raw --out dataset/split --ratios 8 1 1
+```
+
+按"每张图含有的最稀有类别实例数"贪心分层,保证稀有类在 val/test 均有覆盖。
+
+### Copy-Paste 小缺陷增强
+
+```bash
+python tools/copy_paste_augment.py --data dataset/data.yaml --multiplier 1
+python tools/copy_paste_augment.py --data dataset/data.yaml --patches 1 3 --max-iou 0.1
+```
+
+纯 PIL 实现(无 cv2 依赖):裁剪缺陷 patch → 旋转/缩放/亮度抖动 → 粘贴到随机位置(与现有框 IoU ≤ 0.1),解决小缺陷样本不足问题。
+
+### SAM 辅助预标注
+
+```bash
+python tools/sam_auto_label.py --source dataset/unlabeled --det-model models/best.pt
+python tools/sam_auto_label.py --source dataset/unlabeled --conf 0.35 --det-only
+```
+
+检测模型出粗框 → SAM(sam_b.pt,首次运行自动下载 ≈375MB)精修掩码 → YOLO 标签 + 掩码可视化审核图,无检测图片自动列入报告待人工补标。
+
+### 难例挖掘(badcase 回流)
+
+```bash
+python tools/badcase_mining.py --weights models/best.pt --split val
+python tools/badcase_mining.py --weights models/best.pt --low-conf 0.35 --limit 200
+```
+
+漏检 FN / 误检 FP / 低置信 TP 自动裁剪归档 + 整图标注可视化 + CSV 汇总;人工复核后放回训练集重训,形成数据回流闭环。输出 `docs/badcase_report.md`。
+
+---
+
 ## 📦 安装与使用
 
 ### 环境要求
@@ -250,6 +374,24 @@ quexian_detect/
 ├── README.md                    # 项目文档
 ├── CODE_GUIDE.md                # 逐文件代码说明
 ├── .gitignore                   # Git 忽略规则
+│
+├── tools/                       # ★ 实验/部署/数据工具链
+│   ├── common.py                #   公共函数 (设备检测/超参/报告输出)
+│   ├── export.py                #   导出 ONNX / TensorRT
+│   ├── prune.py                 #   BN-L1 结构化通道剪枝
+│   ├── distill.py               #   特征级知识蒸馏
+│   ├── benchmark.py             #   全链路分阶段延迟基准
+│   ├── ablation.py              #   消融实验 (5 变体)
+│   ├── compare_baselines.py     #   跨模型对比 (yolov8n/yolo11n/rtdetr-l)
+│   ├── dataset_check.py         #   数据集体检
+│   ├── dataset_split.py         #   分层划分 train/val/test
+│   ├── copy_paste_augment.py    #   Copy-Paste 小缺陷增强
+│   ├── badcase_mining.py        #   难例挖掘 (FN/FP/低置信回流)
+│   └── sam_auto_label.py        #   SAM 辅助预标注
+│
+├── docs/                        # 自动生成的实验报告 + 标注规范
+│   ├── ANNOTATION_GUIDE.md      #   数据集标注规范
+│   └── *_report.md              #   各工具自动输出的 markdown 报告
 │
 ├── utils/                       # GUI 界面模块
 │   ├── main_window.ui/py        # 主窗口 (Qt Designer 设计)

@@ -1,3 +1,4 @@
+import os
 import warnings
 import torch
 from ultralytics import YOLO
@@ -37,5 +38,6 @@ if __name__ == '__main__':
 
     # ==================== 保存最终模型 ====================
     save_dir = './runs/detect/train_final'
+    os.makedirs(save_dir, exist_ok=True)
     torch.save(model.model.state_dict(), f'{save_dir}/final_model.pt')
     print(f'模型已保存至: {save_dir}/final_model.pt')

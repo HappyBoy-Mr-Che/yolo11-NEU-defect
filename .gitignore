@@ -13,7 +13,7 @@ build/
 
 # 模型权重（太大，不上传 GitHub）
 models/*.pt
-models/*.onnx
+models/*.onnx*
 models/*.engine
 
 # 数据集（太大）

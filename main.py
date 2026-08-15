@@ -1,3 +1,12 @@
+import sys
+from pathlib import Path
+
+# Qt 资源模块 camera_rc(utils/)与 img_rc(ui_images/)不在项目根, 需加入 sys.path 才能 import
+ROOT = Path(__file__).resolve().parent
+for _p in (str(ROOT), str(ROOT / "utils"), str(ROOT / "ui_images")):
+    if _p not in sys.path:
+        sys.path.append(_p)
+
 import random
 import sqlite3
 import numpy as np
@@ -7,6 +16,7 @@ from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import QTimer
 from utils.main_window import Ui_MainWindow
 from utils.plot_mask import draw_detections
+from utils.detection_worker import DetectionWorker
 from PyQt5.QtWidgets import QMainWindow,QApplication,QGraphicsDropShadowEffect,QMessageBox
 from PyQt5 import QtWidgets
 from PyQt5.QtGui import QMouseEvent,QColor
@@ -18,12 +28,6 @@ import warnings
 warnings.filterwarnings("ignore")
 from utils.ui_login import Ui_Login
 import cv2
-
-FILE = Path(__file__).resolve()
-ROOT = FILE.parents[0]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))  # add ROOT to PATH
-# ROOTS = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 def convert2QImage(img):
     height, width, channel = img.shape
@@ -87,6 +91,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.results = []
         self.camera = None
         self.running = False
+        self.worker = None          # DetectionWorker 推理线程
+        self.mode = None            # "video" / "camera", 标记结果回显去向
+        self.worker_params = {"conf": self.numcon, "iou": self.numiou}  # 滑块参数, 推理时实时读取
         self.bind_slots()
         # self.init_icons()
         self.label.setText('基于YOLO的钢材表面缺陷实时检测系统')
@@ -159,9 +166,19 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                         for _ in range(3)] for _ in self.names]
         print("model initial done")
 
+        self._reset_worker()
+
         QtWidgets.QMessageBox.information(self, u"!", u"模型初始化成功", buttons=QtWidgets.QMessageBox.Ok,
                                           defaultButton=QtWidgets.QMessageBox.Ok)
         self.lineEdit.setText("成功初始化模型!!!")
+
+    def _reset_worker(self):
+        """(重新)创建推理工作线程: 换模型时先停旧线程。"""
+        if self.worker is not None:
+            self.worker.stop()
+        self.worker = DetectionWorker(self.model, self.worker_params)
+        self.worker.result_ready.connect(self.on_result_ready)
+        self.worker.start()
 
     def detect_begin(self):
         # name_list = []
@@ -228,47 +245,52 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     # 视频检测
     def detect_video(self):
         self.timer.start()
+        self.mode = "video"
         ret, frame = self.video.read()
         if not ret:
             self.timer.stop()
             self.video.release()
             self.out.release()
+            self.mode = None
+            if self.worker is not None:
+                self.worker.stop()
         else:
-            name_list = []   
+            # 只读帧入队, 推理在 DetectionWorker 子线程完成
+            self.worker.put_frame(frame)
+            self.lineEdit.setText('正在检测视频！！！')
 
-            self.comboBox.clear()
+    def on_result_ready(self, payload):
+        """推理结果回显 (子线程 emit, Qt 自动排队到主线程执行)。"""
+        frame, pred, speed = payload
+        if self.mode is None:
+            return
 
-            # 检测每一帧
-            self.pred = self.model.predict(source=frame, iou=self.numiou, conf=self.numcon)  # save plotted images
-            preprocess_speed = self.pred[0].speed['preprocess']
-            inference_speed = self.pred[0].speed['inference']
-            postprocess_speed = self.pred[0].speed['postprocess']
-            self.lineEdit_detect_time.setText(str(round((preprocess_speed + inference_speed + postprocess_speed) / 1000, 2)))
-            self.lineEdit_detect_object_nums.setText(str(self.pred[0].boxes.conf.shape[0]))
+        self.lineEdit_detect_time.setText(str(round(speed / 1000, 2)))
+        self.lineEdit_detect_object_nums.setText(str(pred.boxes.conf.shape[0]))
 
-            self.results = self.pred[0].boxes.xyxy.tolist()
+        self.results = pred.boxes.xyxy.tolist()
+        self.comboBox.clear()
+        if pred.boxes.conf.shape[0]:
+            for i in range(pred.boxes.conf.shape[0]):
+                self.comboBox.addItem('目标' + str(i + 1))
 
-            if self.pred[0].boxes.conf.shape[0]:
-                for i in range(self.pred[0].boxes.conf.shape[0]):
-                    self.comboBox.addItem('目标' + str(i + 1))
+        # 画图
+        conf_list = pred.boxes.conf.tolist()
+        cls_list_int = [int(i) for i in pred.boxes.cls.tolist()]
+        xyxy_list_int = [[round(num) for num in sublist] for sublist in pred.boxes.xyxy.tolist()]
 
-            # 画图
-            conf_list = self.pred[0].boxes.conf.tolist()
-            cls_list_int = [int(i) for i in self.pred[0].boxes.cls.tolist()]
-            xyxy_list_int = [[round(num) for num in sublist] for sublist in self.pred[0].boxes.xyxy.tolist()]
+        self.combined_image = draw_detections(frame, xyxy_list_int, conf_list, cls_list_int, 0.4)
 
-            self.combined_image = draw_detections(frame, xyxy_list_int, conf_list, cls_list_int, 0.4)
-
-            # 写视频
+        # 写视频 (仅视频模式)
+        if self.mode == "video" and self.out is not None:
             self.out.write(self.combined_image)
 
-            self.result_frame = cv2.cvtColor(self.combined_image, cv2.COLOR_BGR2BGRA)
-            self.QtImg = QtGui.QImage(
-                self.result_frame.data, self.result_frame.shape[1], self.result_frame.shape[0], QtGui.QImage.Format_RGB32)
-            
-            self.input.setPixmap(QtGui.QPixmap.fromImage(self.QtImg))
-            self.input.setScaledContents(True)  # 自适应界面大小
-            self.lineEdit.setText('正在检测视频！！！')
+        self.result_frame = cv2.cvtColor(self.combined_image, cv2.COLOR_BGR2BGRA)
+        self.QtImg = QtGui.QImage(
+            self.result_frame.data, self.result_frame.shape[1], self.result_frame.shape[0], QtGui.QImage.Format_RGB32)
+
+        self.input.setPixmap(QtGui.QPixmap.fromImage(self.QtImg))
+        self.input.setScaledContents(True)  # 自适应界面大小
 
     def suspend_video(self):
         self.timer.blockSignals(False)
@@ -281,6 +303,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.button_video_suspend.setText(u'暂停视频检测')
 
     def stop_video(self):
+        self.mode = None
+        if self.worker is not None:
+            self.worker.stop()
         if self.num_stop % 2 == 0:
             self.video.release()
             self.out.release()
@@ -378,7 +403,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.numiou = self.iou_slider.value() / 100.0
         self.con_number.setValue(self.numcon)
         self.iou_number.setValue(self.numiou)
-    
+        self.worker_params["conf"] = self.numcon
+        self.worker_params["iou"] = self.numiou
+
     def Value_change(self):
         num_conf = self.con_number.value()
         num_ious = self.iou_number.value()
@@ -386,6 +413,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.iou_slider.setValue(int(num_ious * 100))
         self.numcon = num_conf
         self.numiou = num_ious
+        self.worker_params["conf"] = num_conf
+        self.worker_params["iou"] = num_ious
         
     def value_change_comboBox(self):
         self.lineEdit_xmin.clear()
@@ -420,39 +449,11 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.input.setScaledContents(True)
 
             if self.running:
-                name_list = []
-                self.comboBox.clear()
-                # frame_showing = frame
-                # 检测每一帧
-                self.pred = self.model.predict(source=frame, conf=self.numcon, iou=self.numiou)  # save plotted images
-                preprocess_speed = self.pred[0].speed['preprocess']
-                inference_speed = self.pred[0].speed['inference']
-                postprocess_speed = self.pred[0].speed['postprocess']
-                self.lineEdit_detect_time.setText(str(round((preprocess_speed + inference_speed + postprocess_speed) / 1000, 2)))
-                self.lineEdit_detect_object_nums.setText(str(self.pred[0].boxes.conf.shape[0]))
-
-                self.results = self.pred[0].boxes.xyxy.tolist()
-
-                if self.pred[0].boxes.conf.shape[0]:
-                    for i in range(self.pred[0].boxes.conf.shape[0]):
-                        self.comboBox.addItem('目标' + str(i + 1))
-
-                # 画图
-                conf_list = self.pred[0].boxes.conf.tolist()
-                cls_list_int = [int(i) for i in self.pred[0].boxes.cls.tolist()]
-                xyxy_list_int = [[round(num) for num in sublist] for sublist in self.pred[0].boxes.xyxy.tolist()]
-
-                self.combined_image = draw_detections(frame, xyxy_list_int, conf_list, cls_list_int, 0.4)
-
-                self.result_frame = cv2.cvtColor(self.combined_image, cv2.COLOR_BGR2BGRA)
-                self.QtImg = QtGui.QImage(
-                    self.result_frame.data, self.result_frame.shape[1], self.result_frame.shape[0], QtGui.QImage.Format_RGB32)
-                
-                self.input.setPixmap(QtGui.QPixmap.fromImage(self.QtImg))
-                self.input.setScaledContents(True)  # 自适应界面大小
-
+                # 只读帧入队, 推理在 DetectionWorker 子线程完成
+                self.mode = "camera"
+                self.worker.put_frame(frame)
                 self.lineEdit.setText('正在使用摄像头进行检测！！！')
-                
+
         else:
             self.timer_c.stop()
             self.camera.release()
@@ -460,6 +461,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def close_camera(self):
         self.running = False
+        self.mode = None
+        if self.worker is not None:
+            self.worker.stop()
         self.camera = None
         self.timer_c.stop()
         self.input.setPixmap(QPixmap())
@@ -476,6 +480,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     def detect_camera_running(self):
         self.running = True
+
+    def closeEvent(self, event):
+        """窗口关闭时停掉推理线程, 避免退出卡死。"""
+        self.mode = None
+        if self.worker is not None:
+            self.worker.stop()
+        event.accept()
 
     def bind_slots(self):
         self.buttton_image_select.clicked.connect(self.open_image)

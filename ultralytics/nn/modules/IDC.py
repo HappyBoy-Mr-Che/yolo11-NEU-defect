@@ -252,7 +252,7 @@ class DASConv_1(nn.Module):
             nn.BatchNorm2d(self.dim_conv3, momentum=bn_mom),
             nn.ReLU(inplace=True),
         )
-        self.iAFF = iAFF(c1)
+        self.iAFF = iAFF(2 * self.dim_conv3)  # x_l/x_r 各为 2*dim_conv3 通道
 
 
     def forward(self, x):
